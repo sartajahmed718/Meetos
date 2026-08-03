@@ -5,6 +5,12 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { useMeetOSStore } from '@/lib/store';
+import { insertBookingDb } from '@/lib/supabase';
+import {
+  generateGoogleCalendarUrl,
+  generateOutlookCalendarUrl,
+  generateIcsFileDownload,
+} from '@/lib/calendar-sync';
 import { Button } from '@/ui/button';
 import { Input, Badge } from '@/ui/input';
 import {
@@ -15,6 +21,9 @@ import {
   CheckCircle2,
   ArrowRight,
   Sparkles,
+  Download,
+  Mail,
+  ExternalLink,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -44,11 +53,11 @@ export default function PublicBookingPage() {
     '09:00', '09:30', '10:30', '11:00', '14:00', '14:30', '15:30', '16:00'
   ];
 
-  const handleBookingSubmit = (e: React.FormEvent) => {
+  const handleBookingSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!guestName || !guestEmail) return;
 
-    const newBk = addBooking({
+    const bookingPayload = {
       meetingTypeId: meetingType.id,
       meetingTitle: meetingType.title,
       guestName,
@@ -66,7 +75,13 @@ export default function PublicBookingPage() {
       hostName: host.name,
       hostEmail: host.email,
       pricePaid: meetingType.price,
-    });
+    };
+
+    // 1. Add to local state store
+    const newBk = addBooking(bookingPayload);
+
+    // 2. Persist to Supabase Database
+    await insertBookingDb(bookingPayload);
 
     setConfirmedBooking(newBk);
     setStep(3);
@@ -77,6 +92,23 @@ export default function PublicBookingPage() {
       origin: { y: 0.6 },
     });
   };
+
+  // Calendar Sync Event Links
+  const eventDetails = confirmedBooking ? {
+    title: confirmedBooking.meetingTitle,
+    startDate: confirmedBooking.date,
+    startTime: confirmedBooking.time,
+    durationMinutes: meetingType.duration,
+    hostName: confirmedBooking.hostName,
+    hostEmail: confirmedBooking.hostEmail,
+    guestName: confirmedBooking.guestName,
+    guestEmail: confirmedBooking.guestEmail,
+    location: confirmedBooking.locationUrl,
+  } : null;
+
+  const googleUrl = eventDetails ? generateGoogleCalendarUrl(eventDetails) : '#';
+  const outlookUrl = eventDetails ? generateOutlookCalendarUrl(eventDetails) : '#';
+  const icsDownloadUrl = eventDetails ? generateIcsFileDownload(eventDetails) : '#';
 
   return (
     <div className="min-h-screen bg-[#f5f5f7] text-zinc-900 flex flex-col items-center justify-center p-4 sm:p-8 md:p-12 relative overflow-hidden font-sans">
@@ -258,9 +290,9 @@ export default function PublicBookingPage() {
             </form>
           )}
 
-          {/* Step 3: Success Screen */}
+          {/* Step 3: Confirmation & Bi-Directional Calendar Invite Downloads */}
           {step === 3 && confirmedBooking && (
-            <div className="max-w-md mx-auto text-center space-y-6 py-6">
+            <div className="max-w-xl mx-auto text-center space-y-6 py-4">
               <div className="w-20 h-20 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 mx-auto shadow-md">
                 <CheckCircle2 className="w-10 h-10" />
               </div>
@@ -268,7 +300,7 @@ export default function PublicBookingPage() {
               <div>
                 <h2 className="text-3xl font-black text-zinc-900 tracking-tight">Meeting Confirmed!</h2>
                 <p className="text-sm text-zinc-500 mt-2">
-                  A calendar invite and confirmation email have been sent to <span className="text-zinc-900 font-bold">{confirmedBooking.guestEmail}</span>.
+                  Calendar invites and automated confirmations have been dispatched to both <span className="text-zinc-900 font-bold">{confirmedBooking.guestEmail}</span> and <span className="text-zinc-900 font-bold">{confirmedBooking.hostEmail}</span>.
                 </p>
               </div>
 
@@ -281,28 +313,47 @@ export default function PublicBookingPage() {
                   <span className="text-zinc-500 font-medium">Date & Time</span>
                   <span className="font-bold text-zinc-900">{confirmedBooking.date} at {confirmedBooking.time}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between border-b border-zinc-200 pb-2.5">
                   <span className="text-zinc-500 font-medium">Host</span>
-                  <span className="font-bold text-zinc-900">{confirmedBooking.hostName}</span>
+                  <span className="font-bold text-zinc-900">{confirmedBooking.hostName} ({confirmedBooking.hostEmail})</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500 font-medium">Attendee</span>
+                  <span className="font-bold text-zinc-900">{confirmedBooking.guestName} ({confirmedBooking.guestEmail})</span>
                 </div>
               </div>
 
-              {/* Add to Calendar Links */}
-              <div className="space-y-3 pt-2">
-                <span className="text-xs font-bold text-zinc-500 uppercase tracking-wider block">Add to Your Calendar:</span>
-                <div className="flex justify-center gap-3">
-                  <Button variant="outline" size="sm" icon={<CalendarIcon className="w-3.5 h-3.5" />} className="text-xs rounded-full font-bold">
-                    Google Calendar
-                  </Button>
-                  <Button variant="outline" size="sm" icon={<CalendarIcon className="w-3.5 h-3.5" />} className="text-xs rounded-full font-bold">
-                    Outlook / iCal
-                  </Button>
+              {/* Bi-Directional Calendar Invite Buttons for Both Parties */}
+              <div className="p-5 rounded-2xl bg-indigo-50/70 border border-indigo-100 space-y-3 text-left">
+                <span className="text-xs font-bold text-zinc-900 flex items-center gap-2">
+                  <CalendarIcon className="w-4 h-4 text-indigo-600" />
+                  Add Meeting directly to your Calendar (Host & Guest):
+                </span>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+                  <Link href={googleUrl} target="_blank">
+                    <Button variant="outline" size="sm" icon={<ExternalLink className="w-3.5 h-3.5 text-blue-600" />} className="w-full text-xs rounded-full font-bold bg-white">
+                      Google Calendar
+                    </Button>
+                  </Link>
+
+                  <Link href={outlookUrl} target="_blank">
+                    <Button variant="outline" size="sm" icon={<ExternalLink className="w-3.5 h-3.5 text-blue-700" />} className="w-full text-xs rounded-full font-bold bg-white">
+                      Outlook Calendar
+                    </Button>
+                  </Link>
+
+                  <a href={icsDownloadUrl} download={`meetos-booking-${confirmedBooking.date}.ics`}>
+                    <Button variant="outline" size="sm" icon={<Download className="w-3.5 h-3.5 text-zinc-700" />} className="w-full text-xs rounded-full font-bold bg-white">
+                      Download .ICS iCal
+                    </Button>
+                  </a>
                 </div>
               </div>
 
-              <div className="pt-6 border-t border-zinc-200">
+              <div className="pt-4 border-t border-zinc-200 flex justify-center gap-3">
                 <Link href="/dashboard">
-                  <Button variant="secondary" size="sm" className="text-xs rounded-full font-bold">
+                  <Button variant="primary" size="sm" className="text-xs rounded-full font-bold">
                     Return to Workspace Dashboard →
                   </Button>
                 </Link>
